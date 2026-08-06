@@ -46,7 +46,7 @@ NUM_DEPLOYMENTS = 4
 # e.g. 1..6, then 7..12, ... 25..30; if a batch crashes, only that batch is lost
 # and re-running it picks up where the earlier batches left off.
 START_RUN = 1
-END_RUN = 6
+END_RUN = 3
 
 # Maximum number of generations per evolutionary run (also the length the
 # per-run fitness series are padded to for the multi-run study).

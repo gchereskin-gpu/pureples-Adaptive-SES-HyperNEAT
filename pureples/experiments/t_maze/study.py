@@ -59,15 +59,46 @@ class RunRecord:
     constant_feedback_fitness: float = None  # Test 4: mean over the constant-feedback deployments
 
     @property
-    def connection_ratio(self):
+    def dominant_connection_share(self):
         """
-        Inhibitory/excitatory connection ratio (inf when no excitatory
-        connections), or None when the connection counts were never measured
-        (a record written before every run was analysed).
+        Abundance of whichever signed connection type is more common in this
+        network, as a fraction of the signed standard connections: 1.0 when the
+        network has only one type, 0.5 when the two are exactly balanced (and
+        also when there are no signed connections at all).
+
+        This is deliberately sign-blind. A plain inhibitory/excitatory ratio
+        carries the direction of the imbalance, so averaging it over many runs --
+        half of which lean one way and half the other -- cancels out towards a
+        meaningless middle. Taking the majority type's share instead measures how
+        *lopsided* each network is regardless of which way it leans, so the
+        across-runs mean stays interpretable: near 0.5 means runs typically
+        produce balanced networks, near 1.0 means they typically commit to one
+        connection type.
+
+        Returns None when the connection counts were never measured (a record
+        written before every run was analysed).
         """
         if self.inhibitory_count is None or self.excitatory_count is None:
             return None
-        return _safe_ratio(self.inhibitory_count, self.excitatory_count)
+        signed = self.inhibitory_count + self.excitatory_count
+        if not signed:
+            return 0.5  # no signed connections: perfectly "balanced" by convention
+        return max(self.inhibitory_count, self.excitatory_count) / signed
+
+    @property
+    def dominant_connection_type(self):
+        """
+        Which connection type ``dominant_connection_share`` describes:
+        ``"inhibitory"``, ``"excitatory"``, or ``"balanced"`` on a tie (including
+        a network with no signed connections). None when unmeasured.
+        """
+        if self.inhibitory_count is None or self.excitatory_count is None:
+            return None
+        if self.inhibitory_count > self.excitatory_count:
+            return "inhibitory"
+        if self.excitatory_count > self.inhibitory_count:
+            return "excitatory"
+        return "balanced"
 
 
 def save_run_record(path, record):
@@ -112,11 +143,6 @@ def load_saved_records(data_dir, base_name, end_run):
             records.append(load_run_record(path))
     records.sort(key=lambda r: r.run_number)
     return records
-
-
-def _safe_ratio(numerator, denominator):
-    """``numerator/denominator``, or ``float('inf')`` when the denominator is 0."""
-    return numerator / denominator if denominator else float("inf")
 
 
 def _mean_std(values):
@@ -257,13 +283,14 @@ def write_run_report(path, record, max_generations, title):
             f.write("\n")
 
         if record.mean_an_product is not None:
-            ratio = record.connection_ratio
-            ratio_text = ("undefined (no excitatory connections)"
-                          if ratio == float("inf") else f"{ratio:.6f}")
+            share = record.dominant_connection_share
+            share_text = ("not measured" if share is None
+                          else f"{share:.6f} ({record.dominant_connection_type})")
             f.write("Excitatory/inhibitory analysis (sign of A*n per standard connection):\n")
             f.write(f"  Inhibition/excitation ratio (mean of A*n over standard connections): "
                     f"{record.mean_an_product:.6f}\n")
-            f.write(f"  Inhibitory/excitatory connection ratio: {ratio_text}\n")
+            f.write(f"  Dominant connection type abundance (0.5 = balanced, 1 = one type "
+                    f"only): {share_text}\n")
             f.write(f"    inhibitory (A*n < 0) standard connections: {record.inhibitory_count}\n")
             f.write(f"    excitatory (A*n > 0) standard connections: {record.excitatory_count}\n\n")
 
@@ -291,18 +318,20 @@ def write_summary(graph_path, text_path, records, total_runs, max_generations, t
     ``records`` is every run saved on disk so far (see load_saved_records),
     successful and unsuccessful alike.
 
-      * The per-generation fitness curves -- the summary graph and the
-        per-generation table -- average over ALL runs, so an unsuccessful run
-        drags the curve down and the summary reflects the true success rate.
-      * Each solution-quality statistic (post-evolution tests, A*n ratios, CPPN
-        size/branches) is reported twice, with mean and standard deviation: once
-        over ALL saved runs and once over the SUCCESSFUL runs alone. Every run's
-        best genome is tested, so the all-runs figures measure what the algorithm
-        typically produces, while the successful-only figures measure what it
-        produces on the runs that cleared the fitness threshold. Comparing the
-        two shows how much the threshold biases the successful-only view.
-      * Generations-to-solution stays successful-only: an unsuccessful run simply
-        used the whole budget, so averaging it across all runs is meaningless.
+      * The text file is written as two self-contained sections, ALL RUNS first
+        and SUCCESSFUL RUNS below it, each carrying the same statistics in the
+        same order: post-evolution tests, network analysis, and the
+        per-generation fitness table. Every run's best genome is tested, so the
+        all-runs section measures what the algorithm typically produces, while
+        the successful section measures what it produces on the runs that cleared
+        the fitness threshold; reading one against the other shows how much the
+        threshold biases the successful-only view.
+      * Generations-to-solution appears in the successful section only: an
+        unsuccessful run simply used the whole budget, so averaging it across all
+        runs is meaningless.
+      * The summary graph stays all-runs, so an unsuccessful run drags the curve
+        down and the graph reflects the true success rate. The successful
+        section's per-generation table is the successful-only counterpart.
 
     Each statistic is reported alongside the number of runs it was taken over,
     which may be below the group size for records written before every run was
@@ -318,12 +347,15 @@ def write_summary(graph_path, text_path, records, total_runs, max_generations, t
     successful = [r for r in records if r.solved]
 
     generations = list(range(max_generations))
-    mean_of_means = [
-        _stats.mean(r.mean_fitness_per_gen[g] for r in records) for g in generations
-    ]
-    mean_of_bests = [
-        _stats.mean(r.best_fitness_per_gen[g] for r in records) for g in generations
-    ]
+
+    def per_generation_means(group):
+        """``(mean of per-run means, mean of per-run bests)`` per generation."""
+        return ([_stats.mean(r.mean_fitness_per_gen[g] for r in group)
+                 for g in generations],
+                [_stats.mean(r.best_fitness_per_gen[g] for r in group)
+                 for g in generations])
+
+    mean_of_means, mean_of_bests = per_generation_means(records)
 
     # --- Summary graph (all runs) -----------------------------------------
     os.makedirs(os.path.dirname(graph_path), exist_ok=True)
@@ -342,21 +374,21 @@ def write_summary(graph_path, text_path, records, total_runs, max_generations, t
     plt.close(fig)
 
     # --- Solution-quality statistics ---------------------------------------
-    # Every metric is reported for both groups; see this function's docstring.
-    groups = (("all runs", records), ("successful", successful))
+    # Every metric is reported for both groups, each group getting its own
+    # self-contained section; see this function's docstring.
+    groups = (("ALL RUNS", records), ("SUCCESSFUL RUNS", successful))
 
-    gens_mean, gens_std, gens_n = _mean_std(
-        r.generations_to_solution for r in successful)
+    def abs_mean_an_product(record):
+        """
+        Magnitude of a record's mean A*n, or None when unmeasured.
 
-    def finite_connection_ratio(record):
+        The signed mean says which way that one network leans, which is why the
+        per-run report keeps it; averaged over runs that lean either way it
+        cancels towards 0 and stops describing anything. The magnitude answers
+        the question the summary is actually asking -- how strongly the typical
+        run's connections lean, whichever way they lean.
         """
-        A record's inhibitory/excitatory connection ratio, or None when it is
-        unmeasured or infinite. Infinite ratios (a network with no excitatory
-        connections at all) would swamp the mean, so they are excluded and
-        counted separately in the report.
-        """
-        ratio = record.connection_ratio
-        return None if ratio in (None, float("inf")) else ratio
+        return None if record.mean_an_product is None else abs(record.mean_an_product)
 
     # Each test also carries the key of its EXPECTED_ADAPTIVE_FITNESS entry, so
     # the summary prints what an ideal adaptive agent would score next to what was
@@ -384,10 +416,11 @@ def write_summary(graph_path, text_path, records, total_runs, max_generations, t
          lambda r: r.mod_connection_count, "{:.4f}"),
         ("Branches in the final network",
          lambda r: r.num_branches, "{:.4f}"),
-        ("Mean A*n over standard connections (inhibition/excitation ratio)",
-         lambda r: r.mean_an_product, "{:.6f}"),
-        ("Inhibitory/excitatory connection ratio",
-         finite_connection_ratio, "{:.6f}"),
+        ("Mean |A*n| over standard connections (inhibition/excitation ratio, "
+         "magnitude only)",
+         abs_mean_an_product, "{:.6f}"),
+        ("Dominant connection type abundance (0.5 = balanced, 1 = one type only)",
+         lambda r: r.dominant_connection_share, "{:.6f}"),
         ("Inhibitory (A*n < 0) standard connections",
          lambda r: r.inhibitory_count, "{:.4f}"),
         ("Excitatory (A*n > 0) standard connections",
@@ -405,88 +438,86 @@ def write_summary(graph_path, text_path, records, total_runs, max_generations, t
         f.write("=" * 60 + "\n\n")
         f.write(f"Runs with saved data: {len(records)} of {total_runs} expected "
                 f"(runs 1..{total_runs})\n")
-        f.write(f"Successful (solved) runs: {len(successful)}\n")
-        f.write("  Fitness curves (graph + per-generation table) average over ALL "
-                "saved runs.\n  Every statistic below is given twice: over all saved "
-                "runs, and over the\n  successful runs alone. Every run's best genome "
-                "is tested, so the all-runs\n  figures are not conditioned on reaching "
-                "the fitness threshold.\n\n")
+        f.write(f"Successful (solved) runs: {len(successful)}\n\n")
 
-        def write_metric(label, getter, fmt, reference_key=None):
+        def measured_anywhere(getter):
             """
-            Write one metric's mean/std dev for both groups, or skip it entirely.
+            True when at least one saved run measured this metric.
+
+            Decided over all runs rather than per section, so both sections list
+            the same metrics: a metric measured somewhere prints ``no data`` in a
+            section that lacks it instead of vanishing from that section only.
+            One never measured at all (branches on an Adaptive ES study) is
+            dropped from both.
+            """
+            return any(getter(r) is not None for r in records)
+
+        def write_metric(label, getter, fmt, group, reference_key=None):
+            """
+            Write one metric's mean/std dev over ``group``, or skip it entirely.
 
             ``reference_key`` names an EXPECTED_ADAPTIVE_FITNESS entry; when given,
-            the expected/optimum/ceiling fitnesses are printed above the measured
-            figures so the two can be read side by side.
+            the expected/optimum/clairvoyant fitnesses are appended to the metric's
+            own line, so the measured figures sit directly under the references
+            they are read against.
             """
-            stats_by_group = [(name, _mean_std(getter(r) for r in group))
-                              for name, group in groups]
-            if all(n == 0 for _, (_, _, n) in stats_by_group):
-                return  # never measured (e.g. branches on an Adaptive ES study)
-            f.write(f"  {label}:\n")
-            if reference_key is not None:
+            if not measured_anywhere(getter):
+                return
+            mean_v, std_v, n = _mean_std(getter(r) for r in group)
+            if reference_key is None:
+                f.write(f"  {label}:\n")
+            else:
                 expected, optimum, ceiling = EXPECTED_ADAPTIVE_FITNESS[reference_key]
-                f.write(f"    {'expected':<11} (win-stay/lose-shift): "
-                        f"{fmt.format(expected)}"
-                        f"   optimum = {fmt.format(optimum)}"
-                        f"   ceiling = {fmt.format(ceiling)}\n")
-            for name, (mean_v, std_v, n) in stats_by_group:
-                if mean_v is None:
-                    f.write(f"    {name:<11} (n={n:>3}): no data\n")
-                else:
-                    f.write(f"    {name:<11} (n={n:>3}): mean = {fmt.format(mean_v)}"
-                            f"   std dev = {fmt.format(std_v)}\n")
+                f.write(f"  {label}  [expected = {fmt.format(expected)}, "
+                        f"optimum = {fmt.format(optimum)}, "
+                        f"clairvoyant = {fmt.format(ceiling)}]:\n")
+            if mean_v is None:
+                f.write(f"    (n={n:>3}): no data\n")
+            else:
+                f.write(f"    (n={n:>3}): mean = {fmt.format(mean_v)}"
+                        f"   std dev = {fmt.format(std_v)}\n")
 
-        if successful:
-            f.write("Generations to find a solution (successful runs only -- an "
-                    "unsuccessful run\nsimply used the whole budget):\n")
-            f.write(f"    successful  (n={gens_n:>3}): mean = {gens_mean:.4f}"
-                    f"   std dev = {gens_std:.4f}\n\n")
-        else:
-            f.write("No successful runs saved yet, so no generations-to-solution "
-                    "statistic.\n\n")
+        def write_section(name, group):
+            """
+            Write one group's complete set of statistics under its own banner.
 
-        f.write("Post-evolution test fitness (per-run mean over that test's "
-                "deployments;\nmeasured on each run's best genome and never seen in "
-                "training):\n")
-        f.write("  Each test lists three exact reference fitnesses above its measured\n"
-                "  figures, all on the same per-deployment-mean scale as the results:\n"
-                "    expected -- what the natural adaptive strategy (win-stay/lose-shift,\n"
-                "                probing the same arm first every deployment) scores.\n"
-                "                This is the figure an adaptive network is aiming at.\n"
-                "    optimum  -- the best of ALL deterministic reward-history policies;\n"
-                "                it beats win-stay/lose-shift only by exploiting the\n"
-                "                bounded switch window, so a measured score at or above\n"
-                "                it means something is wrong with the measurement.\n"
-                "    ceiling  -- a clairvoyant agent that never needs a probe episode;\n"
-                "                unreachable by anything that must detect switches.\n"
-                "  See EXPECTED_ADAPTIVE_FITNESS in multi_t_maze for each derivation.\n"
-                "  Note Test 4's expected value is 0.0: with the feedback pinned to 1.0 a\n"
-                "  purely reward-driven agent never sees a loss, never switches arms, and\n"
-                "  is zeroed by the single-arm rule. A Test 4 score well above 0 therefore\n"
-                "  indicates arm switching driven by something other than reward content\n"
-                "  (an internal timer or oscillation), not adaptation.\n")
-        for label, getter, fmt, reference_key in test_metrics:
-            write_metric(label, getter, fmt, reference_key)
-        f.write("\n")
+            Both sections carry the same metrics in the same order, so the two can
+            be read against each other. Generations-to-solution appears only in the
+            successful section: an unsuccessful run simply used the whole budget,
+            so it has no meaningful value to average.
+            """
+            f.write("=" * 60 + "\n")
+            f.write(f"{name} (n = {len(group)})\n")
+            f.write("=" * 60 + "\n\n")
 
-        f.write("Network analysis (measured on each run's best genome):\n")
-        for label, getter, fmt in network_metrics:
-            write_metric(label, getter, fmt)
-            if getter is finite_connection_ratio:
-                # Note the infinite ratios dropped by finite_connection_ratio, so
-                # the n above is not mistaken for missing data.
-                for name, group in groups:
-                    excluded = sum(1 for r in group
-                                   if r.connection_ratio == float("inf"))
-                    if excluded:
-                        f.write(f"      ({name}: {excluded} run(s) excluded -- no "
-                                f"excitatory connections, ratio is infinite)\n")
-        f.write("\n")
+            if not group:
+                f.write("No runs in this group.\n\n")
+                return
 
-        f.write("Per-generation summary fitness (mean over ALL saved runs; "
-                "matches the summary graph):\n")
-        f.write("generation,mean_of_mean_fitness,mean_of_best_fitness\n")
-        for gen in generations:
-            f.write(f"{gen},{mean_of_means[gen]:.6f},{mean_of_bests[gen]:.6f}\n")
+            if group is successful:
+                gens_mean, gens_std, gens_n = _mean_std(
+                    r.generations_to_solution for r in group)
+                f.write("Generations to find a solution:\n")
+                f.write(f"    (n={gens_n:>3}): mean = {gens_mean:.4f}"
+                        f"   std dev = {gens_std:.4f}\n\n")
+
+            f.write("Post-evolution test fitness (per-run mean over that test's "
+                    "deployments):\n")
+            for label, getter, fmt, reference_key in test_metrics:
+                write_metric(label, getter, fmt, group, reference_key)
+            f.write("\n")
+
+            f.write("Network analysis (measured on each run's best genome):\n")
+            for label, getter, fmt in network_metrics:
+                write_metric(label, getter, fmt, group)
+            f.write("\n")
+
+            group_means, group_bests = per_generation_means(group)
+            f.write("Per-generation summary fitness:\n")
+            f.write("generation,mean_of_mean_fitness,mean_of_best_fitness\n")
+            for gen in generations:
+                f.write(f"{gen},{group_means[gen]:.6f},{group_bests[gen]:.6f}\n")
+            f.write("\n")
+
+        for name, group in groups:
+            write_section(name, group)
