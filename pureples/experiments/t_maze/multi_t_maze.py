@@ -24,7 +24,7 @@ DEPLOYMENT_SCHEDULE = [
 # ---------------------------------------------------------------------------
 # Post-evolution test schedules.
 #
-# Three tests are run on a winning genome AFTER evolution; none of them ever
+# Four tests are run on a winning genome AFTER evolution; none of them ever
 # influence training. Training always uses the sampled per-genome schedules (see
 # sample_generation_schedule), which are left untouched.
 #
@@ -44,6 +44,15 @@ DEPLOYMENT_SCHEDULE = [
 #     reward feedback the network observes delayed -- on reaching a goal the agent
 #     advances to the next episode immediately and only observes the reward
 #     DELAYED_FEEDBACK_DELAY_STEPS steps later (see MultiTMazeEnv.step).
+#
+#   Test 4 (evaluate_constant_feedback): Test 1's 10 schedules again, presented
+#     with the same immediate timing, but the feedback value the network observes
+#     is pinned to 1.0 for every step of every reward presentation -- a high
+#     reward, a low reward and a timeout all look identical (see
+#     MultiTMazeEnv.feedback_signal). Fitness keeps being scored on the TRUE
+#     reward, so the test asks how much of an agent's adaptation actually depends
+#     on the content of its feedback channel rather than on the mere arrival of a
+#     signal or on an internal timer.
 
 # Test 2 switch episodes, used directly as switch_reward_episode values (the
 # reward swaps AFTER episodes 5, 10 and/or 15 of the 0-indexed 20-episode
@@ -55,7 +64,59 @@ TEST2_EPISODES_PER_DEPLOYMENT = 20
 # Test 3 delay: how many timesteps into the next episode the withheld reward
 # signal is presented to the network. It still pauses movement for
 # reward_process_steps steps once presented -- just delayed to here.
-DELAYED_FEEDBACK_DELAY_STEPS = 5
+DELAYED_FEEDBACK_DELAY_STEPS = 3
+
+# ---------------------------------------------------------------------------
+# Reference fitness per post-evolution test, as ``(expected, optimum, ceiling)``
+# keyed by the RunRecord field the test's result is stored in. All three are
+# exact: they follow from the run-credit scoring in _transition_episode applied to
+# each test's schedules, assuming an agent always reaches the arm it aims for.
+# They are reported alongside the measured means in the study summary, so a result
+# can be read against what perfect play would score rather than in isolation. Each
+# is a mean per deployment -- the same quantity the tests report, and the same
+# quantity training optimises (gym_runner averages a genome's deployments).
+#
+#   "expected" is the natural reward-driven adaptive strategy: win-stay/lose-shift.
+#     It probes one arm on a deployment's first episode, stays while the high
+#     reward keeps coming, and switches on the first low reward. The network is
+#     reset between deployments and is deterministic, so it necessarily probes the
+#     SAME arm first every time -- starting correctly on half the deployments and
+#     wrongly on the other half. In Tests 1/3 that is 18.0 vs 16.0, hence a mean of
+#     17.0 rather than 18.0; in Test 2 it is 36.0 vs 34.0, hence 35.0. This is the
+#     figure a genuinely adaptive network should be compared against.
+#
+#   "optimum" is the best of ALL deterministic policies that read reward history,
+#     found by exhaustive game-tree search over the consistent-deployment sets. It
+#     beats win-stay/lose-shift by exploiting the bounded switch window: every
+#     switch episode is <= 6, so a long enough run of high rewards proves the swap
+#     has already happened and the agent can move across without paying a probe.
+#     A score above "expected" is therefore not impossible -- but a score at or
+#     above "optimum" means something is wrong with the measurement.
+#
+#   "ceiling" is a clairvoyant agent that knows which arm is high on every episode,
+#     including immediately after a switch. Nothing that has to *detect* switches
+#     from feedback can reach it, since detecting a switch costs a probe episode.
+#
+# Test 3 matches Test 1: the withheld reward arrives DELAYED_FEEDBACK_DELAY_STEPS
+# steps into the next episode, still well before the agent reaches the junction
+# (the stem alone takes at least 8 steps at full speed), so the delay changes when
+# an ideal agent learns the outcome but not which arm it then picks.
+#
+# Test 4 is the informative exception. With the feedback pinned to 1.0 a
+# win-stay/lose-shift agent never observes a loss, so it never switches arms, and
+# the single-arm rule in step() zeroes the whole deployment -- expected fitness
+# 0.0. Its optimum, 14.7, is the best FIXED open-loop arm sequence (switch arms
+# once at a fixed episode, ignoring feedback entirely), found by brute force over
+# all 2^10 sequences: with a constant signal every deployment produces an identical
+# observation history, so no policy can be anything but open-loop. A Test 4 score
+# well above 0 therefore means the agent's arm switching is NOT driven by reward
+# content -- an internal timer or oscillation would land in this range.
+EXPECTED_ADAPTIVE_FITNESS = {
+    "all_switch": (17.0, 17.4, 20.0),
+    "double_switch": (35.0, 226 / 6, 40.0),   # Test 2 optimum is 226/6 = 37.6667
+    "delayed_feedback": (17.0, 17.4, 20.0),
+    "constant_feedback": (0.0, 14.7, 20.0),
+}
 
 # Candidate switch_reward_episode values for a sampled training schedule. A
 # switch_reward_episode of s is the last episode before the reward arms swap, so
@@ -127,14 +188,14 @@ class MultiTMazeEnv(gym.Env):
         self.num_turns = num_turns
         self.ray_step = 0.05  # Distance increment for ray marching
         self.max_ray_distance = 2.0  # Maximum distance for each sensor ray
-        self.reward_process_steps = 5 #TODO: make this an argument to be set in higher level code
+        self.reward_process_steps = 6 #TODO: make this an argument to be set in higher level code
         self.reward = 0.0
         # Episodes (0-indexed) AFTER which the reward arms swap this deployment.
         # A single-switch deployment holds one episode; Test 2 holds two.
         self.switch_episodes = set()
         self.reward_process_timestep = 0
 
-        # Episodes per deployment: 10 for training and Tests 1/3; Test 2
+        # Episodes per deployment: 10 for training and Tests 1/3/4; Test 2
         # (evaluate_double_switch) raises it to TEST2_EPISODES_PER_DEPLOYMENT.
         self.episodes_per_deployment = 10
 
@@ -147,15 +208,27 @@ class MultiTMazeEnv(gym.Env):
         self.pending_reward = 0.0
         self._delayed_pending = False
 
+        # Constant-feedback mode (Test 4). When True the reward value the network
+        # observes is pinned to 1.0 for every step of a reward presentation, so it
+        # says nothing about which arm was reached; fitness keeps being scored on
+        # the true self.reward. See feedback_signal().
+        self.constant_feedback = False
+
+        # True exactly on the steps that present a reward to the network -- the
+        # frozen reward-observation steps of either feedback mode. Only
+        # constant-feedback mode reads it (see feedback_signal); it is maintained
+        # in both modes so the two stay interchangeable.
+        self._presenting_reward = False
+
         # The schedule reset() steps through, and the index into it for the next
         # reset(). It defaults to DEPLOYMENT_SCHEDULE, but training overrides it
         # every generation via set_training_schedule() with a freshly sampled
         # schedule (see sample_generation_schedule). The post-evolution test
         # evaluators (evaluate_all_single_switch / evaluate_double_switch /
-        # evaluate_delayed_feedback) temporarily swap in their own schedules and
-        # restore this afterwards. Each of a genome's deployments steps through
-        # the active schedule in order; call reset_switch_history() to start over
-        # at deployment 1.
+        # evaluate_delayed_feedback / evaluate_constant_feedback) temporarily swap
+        # in their own schedules and restore this afterwards. Each deployment of a
+        # genome steps through the active schedule in order; call
+        # reset_switch_history() to start over at deployment 1.
         self.active_schedule = DEPLOYMENT_SCHEDULE
         self._deployment_index = 0
 
@@ -184,6 +257,7 @@ class MultiTMazeEnv(gym.Env):
         # Delayed feedback (Test 3): no reward is queued at the start of a deployment.
         self.pending_reward = 0.0
         self._delayed_pending = False
+        self._presenting_reward = False
 
         ob = self.observe()
 
@@ -223,8 +297,9 @@ class MultiTMazeEnv(gym.Env):
         Used to apply a freshly sampled per-genome training schedule (see
         sample_generation_schedule) before a genome is evaluated. The
         post-evolution test evaluators (evaluate_all_single_switch /
-        evaluate_double_switch / evaluate_delayed_feedback) set active_schedule
-        directly instead; they must never run while training.
+        evaluate_double_switch / evaluate_delayed_feedback /
+        evaluate_constant_feedback) set active_schedule directly instead; they
+        must never run while training.
         """
         self.active_schedule = list(schedule)
         self._deployment_index = 0
@@ -318,6 +393,7 @@ class MultiTMazeEnv(gym.Env):
             # Observe the reward for reward_process_steps frozen steps.
             if self.reward_process_timestep < self.reward_process_steps:
                 self.reward = 1.0 if high_reward else 0.1 if low_reward else 0.0
+                self._presenting_reward = True
                 ob = self.observe()
                 self.reward_process_timestep += 1
 
@@ -350,17 +426,20 @@ class MultiTMazeEnv(gym.Env):
         if self.reward_process_timestep > 0:
             # Mid-presentation of a queued reward: stay frozen and keep showing it.
             self.reward = self.pending_reward
+            self._presenting_reward = True
             ob = self.observe()
             self.reward_process_timestep += 1
             if self.reward_process_timestep >= self.reward_process_steps:
                 self.reward_process_timestep = 0
                 self.reward = 0.0
                 self.pending_reward = 0.0
+                self._presenting_reward = False
         elif begin_delayed:
             # DELAYED_FEEDBACK_DELAY_STEPS into the new episode: begin presenting
             # the queued reward (this frozen step is the first of the presentation).
             self._delayed_pending = False
             self.reward = self.pending_reward
+            self._presenting_reward = True
             ob = self.observe()
             self.reward_process_timestep = 1
         elif self.episode_timestep >= 30 or high_reward or low_reward:
@@ -423,6 +502,9 @@ class MultiTMazeEnv(gym.Env):
             self._run_first_pending = self.reward != 0.0
         self.last_reward = self.reward
         self.reward = 0.0
+        # The presentation (if any) ended with this episode, so any observation
+        # taken after this point is an ordinary navigation observation.
+        self._presenting_reward = False
 
         # switch reward sides if appropriate (always flip to the opposite arm)
         if self.current_episode in self.switch_episodes:
@@ -456,10 +538,28 @@ class MultiTMazeEnv(gym.Env):
 
             ob.append(sensed_distance)
 
-        # Append the reward value.
-        ob.append(self.reward)
+        # Append the reward value the network is allowed to see this step.
+        ob.append(self.feedback_signal())
 
         return ob
+
+    def feedback_signal(self):
+        """
+        Return the reward value the network observes this step.
+
+        Normally this is just the reward reached (``self.reward``): 0.0 while
+        navigating, and the true 1.0 / 0.1 / 0.0 throughout a reward presentation.
+
+        Under constant-feedback mode (Test 4) every step of a presentation reports
+        1.0 instead, whichever arm was actually reached -- so a high reward, a low
+        reward and a timeout are indistinguishable and the signal carries no
+        information beyond its own arrival. Fitness scoring is untouched:
+        _transition_episode reads the true ``self.reward``, so the test measures
+        how much of an agent's adaptation really depends on reward content.
+        """
+        if self.constant_feedback and self._presenting_reward:
+            return 1.0
+        return self.reward
 
     def point_in_maze(self, point):
         """Return True when the point lies inside any maze-path square."""
@@ -613,25 +713,28 @@ def draw_tmaze_frame(state, ax, title):
 
 
 def _run_eval_schedule(net, env, schedule, episodes_per_deployment=10,
-                       delayed_feedback=False, max_steps=500):
+                       delayed_feedback=False, constant_feedback=False,
+                       max_steps=500):
     """
     Roll ``net`` out on every deployment in ``schedule`` and return the list of
     per-deployment total fitnesses.
 
     Post-evolution only: this configures the env for the requested test
-    (schedule, episodes-per-deployment, delayed feedback), runs one deployment
-    per schedule entry with one activation per step (matching how genomes are
-    evaluated during training), resets the network between deployments, and
-    restores the env's previous configuration before returning so a shared env
-    instance stays safe to reuse for further evolution.
+    (schedule, episodes-per-deployment, delayed feedback, constant feedback),
+    runs one deployment per schedule entry with one activation per step (matching
+    how genomes are evaluated during training), resets the network between
+    deployments, and restores the env's previous configuration before returning
+    so a shared env instance stays safe to reuse for further evolution.
     """
     prev_schedule = env.active_schedule
     prev_episodes = env.episodes_per_deployment
     prev_delayed = env.delayed_feedback
+    prev_constant = env.constant_feedback
 
     env.active_schedule = list(schedule)
     env.episodes_per_deployment = episodes_per_deployment
     env.delayed_feedback = delayed_feedback
+    env.constant_feedback = constant_feedback
     env._deployment_index = 0
     try:
         fitnesses = []
@@ -651,6 +754,7 @@ def _run_eval_schedule(net, env, schedule, episodes_per_deployment=10,
         env.active_schedule = prev_schedule
         env.episodes_per_deployment = prev_episodes
         env.delayed_feedback = prev_delayed
+        env.constant_feedback = prev_constant
         env._deployment_index = 0
 
     return fitnesses
@@ -697,6 +801,23 @@ def evaluate_delayed_feedback(net, env, max_steps=500):
     return _run_eval_schedule(net, env, all_single_switch_schedules(),
                               episodes_per_deployment=10, delayed_feedback=True,
                               max_steps=max_steps)
+
+
+def evaluate_constant_feedback(net, env, max_steps=500):
+    """
+    Test 4: Test 1's schedules with an uninformative reward signal.
+
+    Runs the same all-single-switch sweep as evaluate_all_single_switch, with the
+    same immediate presentation timing, but every step of every reward
+    presentation shows the network a feedback value of 1.0 regardless of the arm
+    actually reached (see MultiTMazeEnv.feedback_signal). Fitness is still scored
+    on the true rewards, so the result is what the agent earns once its feedback
+    channel can no longer distinguish the high-reward arm from the low-reward one.
+    Returns the per-deployment fitnesses.
+    """
+    return _run_eval_schedule(net, env, all_single_switch_schedules(),
+                              episodes_per_deployment=10, delayed_feedback=False,
+                              constant_feedback=True, max_steps=max_steps)
 
 
 def save_run_gif(net, env, gif_path, title, fps=4, max_steps=600,

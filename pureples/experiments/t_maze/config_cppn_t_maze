@@ -2,7 +2,7 @@
 
 [NEAT]
 fitness_criterion     = max
-fitness_threshold     = 17.0
+fitness_threshold     = 10.0
 pop_size              = 300
 reset_on_extinction   = False
 no_fitness_termination = False
@@ -39,8 +39,8 @@ compatibility_disjoint_coefficient = 1.0
 compatibility_weight_coefficient   = 0.5
 
 # connection add/remove rates
-conn_add_prob           = 0.5
-conn_delete_prob        = 0.5
+conn_add_prob           = 0.15
+conn_delete_prob        = 0.15
 
 # connection enable options
 enabled_default         = True
@@ -94,52 +94,6 @@ min_species_size = 5
 
 [AdaptiveDefaultGenome]
 
-# plasticity parameters options
-a_init_mean         = 0.0
-a_init_stdev        = 0.4
-a_max_value         = 1.0
-a_min_value         = -1.0
-a_mutate_power      = 0.5
-a_mutate_rate       = 0.7
-a_replace_rate      = 0.1
-a_init_type         = gaussian
-
-b_init_mean         = 0.0
-b_init_stdev        = 0.4
-b_max_value         = 1.0
-b_min_value         = -1.0
-b_mutate_power      = 0.5
-b_mutate_rate       = 0.7
-b_replace_rate      = 0.1
-b_init_type         = gaussian
-
-c_init_mean         = 0.0
-c_init_stdev        = 0.4
-c_max_value         = 1.0
-c_min_value         = -1.0
-c_mutate_power      = 0.5
-c_mutate_rate       = 0.7
-c_replace_rate      = 0.1
-c_init_type         = gaussian
-
-d_init_mean         = 0.0
-d_init_stdev        = 0.4
-d_max_value         = 1.0
-d_min_value         = -1.0
-d_mutate_power      = 0.5
-d_mutate_rate       = 0.7
-d_replace_rate      = 0.1
-d_init_type         = gaussian
-
-n_init_mean         = 0.0
-n_init_stdev        = 0.4
-n_max_value         = 1.0
-n_min_value         = -1.0
-n_mutate_power      = 0.5
-n_mutate_rate       = 0.7
-n_replace_rate      = 0.1
-n_init_type         = gaussian
-
 # node activation options
 activation_default      = tanh
 activation_mutate_rate  = 0.5
@@ -171,8 +125,8 @@ compatibility_disjoint_coefficient = 1.0
 compatibility_weight_coefficient   = 0.5
 
 # connection add/remove rates
-conn_add_prob           = 0.5
-conn_delete_prob        = 0.5
+conn_add_prob           = 0.15
+conn_delete_prob        = 0.15
 
 # connection enable options
 enabled_default         = True
@@ -182,7 +136,7 @@ feed_forward            = True
 initial_connection      = full
 
 # node add/remove rates
-node_add_prob           = 0.15
+node_add_prob           = 0.2
 node_delete_prob        = 0.2
 
 # network parameters
@@ -404,11 +358,12 @@ compatibility_disjoint_coefficient = 1.0
 compatibility_weight_coefficient   = 0.5
 
 # connection add/remove rates
-conn_add_prob           = 0.1
-conn_delete_prob        = 0.1
+conn_add_prob           = 0.15
+conn_delete_prob        = 0.15
 
 # branch options
 branch_add_prob         = 0.05
+branch_delete_prob      = 0.05
 is_branch_default       = False
 is_branch_mutate_rate   = 0.0
 is_branch_rate_to_true_add = 0.0
@@ -422,7 +377,7 @@ feed_forward            = True
 initial_connection      = full
 
 # node add/remove rates
-node_add_prob           = 0.15
+node_add_prob           = 0.2
 node_delete_prob        = 0.2
 
 # network parameters
