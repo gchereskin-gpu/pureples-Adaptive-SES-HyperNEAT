@@ -54,8 +54,7 @@ Aug 15
 
 
 Aug 17
--
-Thought of RoboSphere from a different perspective and considered some important questions. As a ‘product’, it needs to be easy to use. I should be able to remotely turn it on/off (perhaps on the dog harness). It could even have different modes, such as selecting different neural networks evolved with different fitness functions, a mode that stops and starts playing periodically to engage with Thor and let him rest.
+	Thought of RoboSphere from a different perspective and considered some important questions. As a ‘product’, it needs to be easy to use. I should be able to remotely turn it on/off (perhaps on the dog harness). It could even have different modes, such as selecting different neural networks evolved with different fitness functions, a mode that stops and starts playing periodically to engage with Thor and let him rest.
 
 Aug 18
 
@@ -65,9 +64,7 @@ Sep 26
 
 Email BD and got a very insightful reply about the design process, and I want to apply it here. COTS components are the way to go right now, and if I can’t find motors that fit properly, I am going to take a new approach and make the sphere bigger. There aren’t particularly any downsides to this, and it gives me an opportunity to buy stronger and better spheres for the sensors to see through.
 
-
 Oct: Rest of the CAD design process not recorded in Github (it’s unrelated to the code)
--
 
 
 Below is the description of Pureples:
