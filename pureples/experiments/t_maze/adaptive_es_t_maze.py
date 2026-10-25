@@ -45,8 +45,8 @@ NUM_DEPLOYMENTS = 4
 # on disk -- not just this batch. Run a study in batches by advancing the window,
 # e.g. 1..6, then 7..12, ... 25..30; if a batch crashes, only that batch is lost
 # and re-running it picks up where the earlier batches left off.
-START_RUN = 1
-END_RUN = 10
+START_RUN = 24
+END_RUN = 30
 
 # Maximum number of generations per evolutionary run (also the length the
 # per-run fitness series are padded to for the multi-run study).

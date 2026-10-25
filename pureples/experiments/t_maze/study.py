@@ -10,14 +10,27 @@ The summary reports each solution-quality statistic twice: over all saved runs
 and over the successful runs alone. Because unsuccessful runs are now tested too,
 the all-runs figures describe what the algorithm typically produces, rather than
 only what it produces on the runs that happened to clear the fitness threshold.
+
+Running this file directly regenerates a finished study's summary files from the
+saved run records, without re-running evolution; see the ``__main__`` block at
+the bottom.
 """
 
 import os
+import re
+import sys
 import json
 import statistics as _stats
 from dataclasses import dataclass, asdict, fields
 from typing import List
 
+# Force matplotlib's non-interactive Agg backend BEFORE any pyplot import. Only
+# figures written to disk are produced here, and the experiment modules that
+# import this one already force Agg themselves (a Tk interpreter created on a
+# worker thread aborts the process); their later plt.switch_backend("TkAgg")
+# calls are runtime switches and are unaffected by this.
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from pureples.experiments.t_maze.multi_t_maze import EXPECTED_ADAPTIVE_FITNESS
@@ -142,6 +155,178 @@ def load_saved_records(data_dir, base_name, end_run):
         if os.path.exists(path):
             records.append(load_run_record(path))
     records.sort(key=lambda r: r.run_number)
+    return records
+
+
+_RECORD_FILENAME = re.compile(r"^(?P<base>.+)_run(?P<number>\d+)\.json$")
+
+
+def discover_study(data_dir):
+    """
+    Return ``(base_name, run_numbers)`` for the records saved in ``data_dir``.
+
+    Both are read off the record filenames rather than off the directory name,
+    which cannot be trusted: an archived copy such as
+    ``..._medium_data (pre-extra-data)`` still holds ``..._medium_run*.json``
+    records. Raises ValueError when the directory holds no records at all, or
+    when it mixes records from more than one study (nothing writes such a
+    directory, but a hand-merged one would silently summarise two studies as
+    one).
+    """
+    if not os.path.isdir(data_dir):
+        raise ValueError(f"No such study directory: {data_dir}")
+
+    base_names = {}
+    for name in os.listdir(data_dir):
+        match = _RECORD_FILENAME.match(name)
+        if match:
+            base_names.setdefault(match.group("base"), []).append(
+                int(match.group("number")))
+
+    if not base_names:
+        raise ValueError(f"No *_run<N>.json records found in {data_dir}")
+    if len(base_names) > 1:
+        raise ValueError(
+            f"{data_dir} mixes records from several studies "
+            f"({', '.join(sorted(base_names))}); pass the one you want as "
+            f"base_name.")
+
+    base_name, run_numbers = next(iter(base_names.items()))
+    return base_name, sorted(run_numbers)
+
+
+def infer_title(base_name):
+    """
+    The report title a study's records were originally written with.
+
+    The experiment scripts pass a fixed title to write_summary; regenerating a
+    summary has only the base name to go on, so map it back to the same string
+    (anything unrecognised falls back to the base name itself).
+    """
+    if base_name.startswith("adaptive_des"):
+        return "Adaptive DES T-Maze"
+    if base_name.startswith("adaptive_es"):
+        return "Adaptive ES T-Maze"
+    return base_name
+
+
+# Short name and colour each algorithm is drawn with in the cross-study
+# comparison graphs. This ASES/AES naming is deliberately confined to those
+# graphs -- the per-study summaries keep the "Adaptive DES/ES T-Maze" titles
+# infer_title returns, so nothing already written changes meaning.
+COMPARISON_STYLE = {
+    "adaptive_des": ("ASES", "tab:red"),
+    "adaptive_es": ("AES", "tab:blue"),
+}
+
+
+def comparison_style(base_name):
+    """
+    ``(short name, colour)`` a study's base name is plotted with in the
+    comparison graphs. Raises ValueError for anything that is not one of the two
+    adaptive algorithms, which are the only ones the comparison is defined for.
+    """
+    for prefix, style in COMPARISON_STYLE.items():
+        if base_name.startswith(prefix):
+            return style
+    raise ValueError(
+        f"No comparison style for {base_name}: expected a study whose name "
+        f"starts with {' or '.join(sorted(COMPARISON_STYLE))}.")
+
+
+def study_variant(base_name):
+    """
+    The part of a base name that identifies the maze and network size, with the
+    algorithm prefix stripped: ``adaptive_des_hyperneat_t_maze_1_turn_medium``
+    becomes ``1_turn_medium``. Used to name the comparison folder after what the
+    two studies have in common rather than after either algorithm.
+    """
+    for prefix in ("adaptive_des_hyperneat_t_maze_", "adaptive_es_hyperneat_t_maze_",
+                   "adaptive_des_", "adaptive_es_"):
+        if base_name.startswith(prefix):
+            return base_name[len(prefix):]
+    return base_name
+
+
+def comparison_dir_name(base_names):
+    """
+    Folder name for the comparison of the given studies, e.g.
+    ``ases_vs_aes_1_turn_medium_comparison`` when both studies are the same
+    variant. Differing variants are both named, so comparing medium against
+    large cannot silently overwrite the medium-against-medium graphs.
+    """
+    variants = [study_variant(name) for name in base_names]
+    shared = variants[0] if len(set(variants)) == 1 else "_vs_".join(variants)
+    return f"ases_vs_aes_{shared}_comparison"
+
+
+def records_generation_budget(records):
+    """
+    The number of generations every record in ``records`` has fitness data for.
+
+    Each record's series was padded to its own study's generation budget, so
+    this is normally the same number for all of them. It is the *shortest*
+    series that bounds what can be summarised, since write_summary indexes every
+    record at every generation it reports; a directory whose records disagree
+    (one built either side of a budget change) is summarised over the common
+    prefix, with a warning.
+    """
+    lengths = {len(r.mean_fitness_per_gen) for r in records}
+    if len(lengths) > 1:
+        print(f"Warning: saved runs have different generation budgets "
+              f"({', '.join(str(n) for n in sorted(lengths))}); summarising "
+              f"over the first {min(lengths)} generations.")
+    return min(lengths)
+
+
+def load_study(data_dir, base_name=None, total_runs=None):
+    """
+    Return ``(base_name, total_runs, records)`` for the study saved in
+    ``data_dir``.
+
+    The study identifies itself: ``base_name`` and the run range come from the
+    record filenames (see discover_study) unless overridden. Raises ValueError
+    when the directory holds no usable records, so callers fail with an
+    explanation instead of on an empty list further down.
+    """
+    discovered_base, run_numbers = discover_study(data_dir)
+    if base_name is None:
+        base_name = discovered_base
+    if total_runs is None:
+        total_runs = max(run_numbers)
+
+    records = load_saved_records(data_dir, base_name, total_runs)
+    if not records:
+        raise ValueError(
+            f"No records for {base_name} runs 1..{total_runs} in {data_dir}")
+    return base_name, total_runs, records
+
+
+def regenerate_summary(data_dir, base_name=None, title=None, total_runs=None,
+                       max_generations=None):
+    """
+    Rebuild a finished study's summary graph and summary text from the run
+    records saved in ``data_dir``, and return the records they were built from.
+
+    This is the whole point of persisting a RunRecord per run: everything the
+    summary reports is already on disk, so changing how the summary presents it
+    needs no evolution. The two files are written to the same paths the
+    experiment scripts use, so they are overwritten in place.
+
+    Every argument except ``data_dir`` is recovered from the saved records when
+    left None -- pass one only to override what was detected.
+    """
+    base_name, total_runs, records = load_study(data_dir, base_name, total_runs)
+    if title is None:
+        title = infer_title(base_name)
+    if max_generations is None:
+        max_generations = records_generation_budget(records)
+
+    write_summary(
+        graph_path=os.path.join(data_dir, f"{base_name}_summary_fitness.png"),
+        text_path=os.path.join(data_dir, f"{base_name}_summary.txt"),
+        records=records, total_runs=total_runs,
+        max_generations=max_generations, title=title)
     return records
 
 
@@ -521,3 +706,285 @@ def write_summary(graph_path, text_path, records, total_runs, max_generations, t
 
         for name, group in groups:
             write_section(name, group)
+
+
+# --- Cross-study comparison graphs -----------------------------------------
+#
+# The per-study summary above describes one algorithm; these put the two side by
+# side on shared axes. They plot the per-generation BEST fitness only (the
+# mean-of-mean series the summary graph also carries would quadruple the lines
+# for little gain), each algorithm drawn as one centre line with a translucent
+# band of the same colour showing the spread across its runs.
+
+# (statistic, filename stem, title text, band text). Both statistics are drawn
+# for both run groups below, giving four graphs.
+COMPARISON_GRAPHS = (
+    ("mean", "mean_best_fitness", "mean best fitness", "±1 std dev"),
+    ("median", "median_best_fitness", "median best fitness", "Q1–Q3"),
+)
+
+# (filename suffix, title text, what the group holds, selector). "All runs"
+# shows what the algorithm typically produces; "successful runs only" shows what
+# it produces when it works, and the two read against each other the same way
+# the summary's two sections do.
+COMPARISON_GROUPS = (
+    ("all_runs", "all runs", "saved runs", lambda records: list(records)),
+    ("successful_runs", "successful runs only", "successful runs",
+     lambda records: [r for r in records if r.solved]),
+)
+
+
+def per_generation_spread(records, max_generations, statistic):
+    """
+    Per-generation series describing the spread of ``records``' BEST fitness.
+
+    Returns a dict of equal-length series, the first entry being the centre line
+    the graph draws and the rest the numbers its band is built from:
+
+      * ``"mean"``   -> ``mean``, ``std_dev``, ``variance``
+      * ``"median"`` -> ``median``, ``q1``, ``q3``
+
+    A single-run group gets a std dev of 0.0 (matching _mean_std's convention)
+    and quartiles equal to its one value, so a study with one saved run still
+    plots a line with a zero-width band instead of raising.
+    """
+    if statistic == "mean":
+        series = {"mean": [], "std_dev": [], "variance": []}
+        for gen in range(max_generations):
+            values = [r.best_fitness_per_gen[gen] for r in records]
+            std_dev = _stats.stdev(values) if len(values) > 1 else 0.0
+            series["mean"].append(_stats.mean(values))
+            series["std_dev"].append(std_dev)
+            series["variance"].append(std_dev * std_dev)
+        return series
+
+    if statistic == "median":
+        series = {"median": [], "q1": [], "q3": []}
+        for gen in range(max_generations):
+            values = [r.best_fitness_per_gen[gen] for r in records]
+            q1, _q2, q3 = _stats.quantiles(values, n=4, method="inclusive")
+            series["median"].append(_stats.median(values))
+            series["q1"].append(q1)
+            series["q3"].append(q3)
+        return series
+
+    raise ValueError(f"Unknown statistic {statistic!r}: expected 'mean' or 'median'.")
+
+
+def spread_band(statistic, series):
+    """
+    ``(lower, upper)`` bounds of the translucent band drawn around a centre line
+    produced by per_generation_spread: one std dev either side of the mean, or
+    the Q1..Q3 range around the median.
+    """
+    if statistic == "mean":
+        return ([m - s for m, s in zip(series["mean"], series["std_dev"])],
+                [m + s for m, s in zip(series["mean"], series["std_dev"])])
+    return series["q1"], series["q3"]
+
+
+def _write_comparison_data(path, heading, generations, plotted, skipped, band_text):
+    """
+    Write the numbers behind one comparison graph: a header naming each study
+    and where it came from, then one row per generation carrying every series
+    that graph plots.
+
+    ``plotted`` is a list of ``(short name, colour, base_name, data_dir,
+    records, series)``; ``skipped`` names the algorithms that had no runs in
+    this group, so the file explains a missing pair of columns rather than
+    leaving the reader to guess.
+    """
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{heading}\n")
+        f.write("=" * 60 + "\n\n")
+        for short, _colour, base_name, data_dir, records, _series in plotted:
+            f.write(f"{short}: {base_name} -- {len(records)} run(s)\n")
+            f.write(f"    from {data_dir}\n")
+        for short, base_name, reason in skipped:
+            f.write(f"{short}: {base_name} -- {reason}; not plotted\n")
+        f.write(f"\nGenerations: {len(generations)}\n")
+        f.write(f"Band drawn around each line: {band_text}\n\n")
+
+        columns = [(f"{short}_{name}", series[name])
+                   for short, _colour, _base, _dir, _records, series in plotted
+                   for name in series]
+        f.write("generation," + ",".join(name for name, _ in columns) + "\n")
+        for gen in generations:
+            values = ",".join(f"{values[gen]:.6f}" for _name, values in columns)
+            f.write(f"{gen},{values}\n")
+
+
+def write_comparison_graphs(output_dir, studies, max_generations=None,
+                            y_limits=(0.0, 18.0)):
+    """
+    Write the cross-study comparison graphs and their data files into
+    ``output_dir``, and return the paths written.
+
+    ``studies`` is a sequence of ``(base_name, data_dir, records)`` -- normally
+    the adaptive DES study and the adaptive ES one, drawn as ASES in red and AES
+    in blue (see COMPARISON_STYLE). Four graphs are produced: mean and median
+    best fitness, each over all runs and over the successful runs alone, each
+    accompanied by a ``.txt`` of the plotted numbers.
+
+    ``max_generations`` defaults to the span every record covers, so pairing a
+    1000-generation study with a 1250-generation one compares them over the
+    common 1000 rather than running off the end of the shorter records. An
+    algorithm with no runs in a group (an all-unsuccessful study in the
+    successful-only graphs) is left out of that graph and named in its title and
+    data file; a group empty for both algorithms is skipped entirely.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if max_generations is None:
+        max_generations = records_generation_budget(
+            [record for _base, _dir, records in studies for record in records])
+    generations = list(range(max_generations))
+
+    pair_name = " vs ".join(comparison_style(base)[0] for base, _dir, _recs in studies)
+    written = []
+
+    for statistic, file_stem, stat_text, band_text in COMPARISON_GRAPHS:
+        for group_suffix, group_text, group_holds, select in COMPARISON_GROUPS:
+            plotted, skipped = [], []
+            for base_name, data_dir, records in studies:
+                short, colour = comparison_style(base_name)
+                group = select(records)
+                if group:
+                    plotted.append((
+                        short, colour, base_name, data_dir, group,
+                        per_generation_spread(group, max_generations, statistic)))
+                else:
+                    skipped.append((short, base_name, f"no {group_holds}"))
+
+            if not plotted:
+                print(f"Skipping {file_stem}_{group_suffix}: neither study has "
+                      f"{group_holds}.")
+                continue
+
+            heading = f"{pair_name} — {stat_text} ({group_text})"
+            if skipped:
+                heading += f" [no data for {', '.join(s for s, _b, _r in skipped)}]"
+
+            fig, ax = plt.subplots(figsize=(9, 6))
+            for short, colour, _base, _dir, group, series in plotted:
+                centre = next(iter(series.values()))
+                lower, upper = spread_band(statistic, series)
+                ax.fill_between(generations, lower, upper, color=colour, alpha=0.4,
+                                linewidth=0, label=f"{short} {band_text}")
+                ax.plot(generations, centre, color=colour, linewidth=1.0,
+                        label=f"{short} (n={len(group)})")
+            ax.set_xlabel("Generation")
+            ax.set_ylabel("Best fitness")
+            ax.set_ylim(*y_limits)
+            ax.set_xlim(0, max_generations - 1)
+            ax.set_title(heading)
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best")
+
+            graph_path = os.path.join(output_dir, f"{file_stem}_{group_suffix}.png")
+            fig.savefig(graph_path, bbox_inches="tight")
+            plt.close(fig)
+
+            data_path = os.path.join(output_dir, f"{file_stem}_{group_suffix}.txt")
+            _write_comparison_data(data_path, heading, generations, plotted,
+                                   skipped, band_text)
+            written.extend((graph_path, data_path))
+
+    return written
+
+
+def _resolve_data_dir(path):
+    """
+    Accept a study directory given relative to the current directory or to the
+    repository root, so the regeneration entry point works from anywhere.
+    """
+    if os.path.isdir(path):
+        return path
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+    from_root = os.path.join(repo_root, path)
+    return from_root if os.path.isdir(from_root) else path
+
+
+# If run as script.
+if __name__ == '__main__':
+    # Rebuild study outputs from the run records already saved on disk -- no
+    # evolution, no re-testing -- so how the results are presented can be changed
+    # without repeating a 30-run study. Set the paths below and run, from the
+    # repo root:
+    #
+    #     python -m pureples.experiments.t_maze.study
+    #
+    # What gets written depends on how many of the two paths are set:
+    #
+    #   * One of them (the other left None): that study's own
+    #     <base>_summary.txt and <base>_summary_fitness.png are rewritten in
+    #     place. Its per-run <base>_run<N>_data.txt reports are left untouched.
+    #   * Both: only the cross-study comparison graphs are written, into a new
+    #     folder under results/ (see COMPARISON_DIR). Neither study's own
+    #     summary files are touched -- set one path to None to refresh those.
+    DES_DATA_DIR = ("pureples/experiments/t_maze/results/"
+                    "adaptive_des_hyperneat_t_maze_1_turn_medium_data")
+    ES_DATA_DIR = ("pureples/experiments/t_maze/results/"
+                   "adaptive_es_hyperneat_t_maze_1_turn_medium_data")
+
+    # Where the comparison graphs go. None names the folder after the two
+    # studies, e.g. results/ases_vs_aes_1_turn_medium_comparison; set a path to
+    # override. Comparison graphs only -- ignored when just one study is set.
+    COMPARISON_DIR = None
+    Y_LIMITS = (0.0, 18.0)  # fitness axis of every comparison graph
+
+    # Both are recovered from the saved records when left None; set one only to
+    # override what was detected.
+    TOTAL_RUNS = None       # highest run number to include; default: highest saved
+    MAX_GENERATIONS = None  # default: the length of the saved fitness series
+
+    selected = [_resolve_data_dir(path)
+                for path in (DES_DATA_DIR, ES_DATA_DIR) if path is not None]
+    if not selected:
+        sys.exit("Nothing to do: set DES_DATA_DIR, ES_DATA_DIR, or both.")
+
+    if len(selected) == 1:
+        target_dir = selected[0]
+        try:
+            summarised = regenerate_summary(target_dir, total_runs=TOTAL_RUNS,
+                                            max_generations=MAX_GENERATIONS)
+            base_name, _run_numbers = discover_study(target_dir)
+        except ValueError as error:
+            sys.exit(f"Cannot regenerate a summary: {error}")
+
+        solved_runs = sum(1 for r in summarised if r.solved)
+        generations_used = (MAX_GENERATIONS if MAX_GENERATIONS is not None
+                            else records_generation_budget(summarised))
+        print(f"Regenerated the summary for {base_name} from {len(summarised)} "
+              f"saved run(s) ({solved_runs} solved) over {generations_used} "
+              f"generations.")
+        print(f"  {os.path.join(target_dir, base_name + '_summary.txt')}")
+        print(f"  {os.path.join(target_dir, base_name + '_summary_fitness.png')}")
+    else:
+        try:
+            loaded = []
+            for data_dir in selected:
+                base_name, _total, records = load_study(data_dir, total_runs=TOTAL_RUNS)
+                comparison_style(base_name)  # fail early on an unrecognised study
+                loaded.append((base_name, data_dir, records))
+
+            # Auto-named beside the studies themselves, so the comparison lands
+            # in results/ next to the data folders it was built from.
+            output_dir = COMPARISON_DIR or os.path.join(
+                os.path.dirname(selected[0]),
+                comparison_dir_name([base for base, _dir, _recs in loaded]))
+            written = write_comparison_graphs(
+                output_dir, loaded, max_generations=MAX_GENERATIONS,
+                y_limits=Y_LIMITS)
+        except ValueError as error:
+            sys.exit(f"Cannot build the comparison graphs: {error}")
+
+        for base_name, _dir, records in loaded:
+            short, _colour = comparison_style(base_name)
+            solved_runs = sum(1 for r in records if r.solved)
+            print(f"{short}: {base_name} -- {len(records)} run(s), "
+                  f"{solved_runs} solved.")
+        print(f"Wrote {len(written)} comparison file(s):")
+        for path in written:
+            print(f"  {path}")

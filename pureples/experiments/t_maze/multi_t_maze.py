@@ -2,6 +2,8 @@ import os
 import math
 import random
 import itertools
+from dataclasses import dataclass, field
+from typing import List
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import gymnasium as gym
@@ -324,17 +326,17 @@ class MultiTMazeEnv(gym.Env):
             # The action is a 3-tuple: [left, forward, right].
             left, forward, right = action
 
-            # Rotate the agent by 20 degrees for each unit of right-minus-left.
-            rotation_delta = 20.0 * (right - left)
+            # Rotate the agent by 17 degrees for each unit of right-minus-left.
+            rotation_delta = 17.0 * (right - left)
             self.rotation = (self.rotation + rotation_delta) % 360.0
 
-            # Move forward in the new heading by forward/4 units.
+            # Move forward in the new heading by forward/8 units.
             old_position = self.current_position.copy()
             heading_x = math.sin(math.radians(self.rotation))
             heading_y = math.cos(math.radians(self.rotation))
             self.current_position = [
-                self.current_position[0] + heading_x * (forward / 4.0),
-                self.current_position[1] + heading_y * (forward / 4.0),
+                self.current_position[0] + heading_x * (forward / 8.0),
+                self.current_position[1] + heading_y * (forward / 8.0),
             ] #TODO: Normalize the forward so that the robot can move backwards or stop when forward is 0.5 or less
 
             # If the new position leaves the maze path, undo the move and end the episode.
@@ -389,7 +391,7 @@ class MultiTMazeEnv(gym.Env):
         reward = 0.0
         terminated = False
 
-        if self.episode_timestep >= 30 or high_reward or low_reward:
+        if self.episode_timestep >= 50 or high_reward or low_reward:
             # Observe the reward for reward_process_steps frozen steps.
             if self.reward_process_timestep < self.reward_process_steps:
                 self.reward = 1.0 if high_reward else 0.1 if low_reward else 0.0
@@ -442,7 +444,7 @@ class MultiTMazeEnv(gym.Env):
             self._presenting_reward = True
             ob = self.observe()
             self.reward_process_timestep = 1
-        elif self.episode_timestep >= 30 or high_reward or low_reward:
+        elif self.episode_timestep >= 50 or high_reward or low_reward:
             # Goal or timeout: score and advance to the next episode right away,
             # queuing the reward for delayed presentation. self.reward is set only
             # so _transition_episode can score the run; _transition_episode clears
@@ -708,13 +710,16 @@ def draw_tmaze_frame(state, ax, title):
 
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    ax.set_title(f"{title} — episode {state['episode']}")
+    # Small enough that a two-line title identifying the test and deployment
+    # still fits the figure width; a clipped title makes a folder of gifs
+    # impossible to tell apart.
+    ax.set_title(f"{title} — episode {state['episode']}", fontsize=10)
     ax.legend(loc="upper right")
 
 
 def _run_eval_schedule(net, env, schedule, episodes_per_deployment=10,
                        delayed_feedback=False, constant_feedback=False,
-                       max_steps=500):
+                       max_steps=1000):
     """
     Roll ``net`` out on every deployment in ``schedule`` and return the list of
     per-deployment total fitnesses.
@@ -760,7 +765,7 @@ def _run_eval_schedule(net, env, schedule, episodes_per_deployment=10,
     return fitnesses
 
 
-def evaluate_all_single_switch(net, env, max_steps=500):
+def evaluate_all_single_switch(net, env, max_steps=1000):
     """
     Test 1: sweep every training-range single-switch schedule.
 
@@ -775,7 +780,7 @@ def evaluate_all_single_switch(net, env, max_steps=500):
                               max_steps=max_steps)
 
 
-def evaluate_double_switch(net, env, max_steps=1000):
+def evaluate_double_switch(net, env, max_steps=2000):
     """
     Test 2: generalization to two reward switches per deployment.
 
@@ -789,7 +794,7 @@ def evaluate_double_switch(net, env, max_steps=1000):
                               delayed_feedback=False, max_steps=max_steps)
 
 
-def evaluate_delayed_feedback(net, env, max_steps=500):
+def evaluate_delayed_feedback(net, env, max_steps=1000):
     """
     Test 3: Test 1's schedules with delayed reward feedback.
 
@@ -803,7 +808,7 @@ def evaluate_delayed_feedback(net, env, max_steps=500):
                               max_steps=max_steps)
 
 
-def evaluate_constant_feedback(net, env, max_steps=500):
+def evaluate_constant_feedback(net, env, max_steps=1000):
     """
     Test 4: Test 1's schedules with an uninformative reward signal.
 
@@ -820,50 +825,188 @@ def evaluate_constant_feedback(net, env, max_steps=500):
                               constant_feedback=True, max_steps=max_steps)
 
 
-def save_run_gif(net, env, gif_path, title, fps=4, max_steps=600,
-                 schedule=None, episodes_per_deployment=10, delayed_feedback=False):
+# ---------------------------------------------------------------------------
+# Recording what a deployment actually did, episode by episode.
+#
+# A deployment's behaviour is summarised by the sequence of rewards it collected
+# -- "HHHLHHHHHH" and the like -- which is what makes a folder of gifs readable
+# without watching them. The three symbols are exhaustive: an episode ends
+# either on the high-reward arm (1.0), on the low-reward one (0.1), or with the
+# agent still in the maze after 30 navigation steps, which scores nothing (see
+# MultiTMazeEnv._transition_episode).
+# ---------------------------------------------------------------------------
+HIGH_REWARD_SYMBOL = "H"
+LOW_REWARD_SYMBOL = "L"
+NO_REWARD_SYMBOL = "-"
+
+# Arms, written in lower case so an arm sequence ("llllrrrrrr") can never be
+# misread as a reward sequence. A timed-out episode reached neither arm.
+SIDE_SYMBOLS = {"left": "l", "right": "r"}
+NO_SIDE_SYMBOL = "."
+
+
+def reward_symbol(reward):
     """
-    Roll out ``net`` on a single deployment and save a gif of the run.
+    The H/L/- symbol for the reward an episode ended on.
+
+    Compared exactly against the two literals step() assigns, the same way
+    _transition_episode scores them.
+    """
+    if reward == 1.0:
+        return HIGH_REWARD_SYMBOL
+    if reward == 0.1:
+        return LOW_REWARD_SYMBOL
+    return NO_REWARD_SYMBOL
+
+
+def reward_side(endpoints):
+    """
+    ``"left"`` or ``"right"`` for one of the env's reward endpoint lists.
+
+    The two endpoints sit at x=-2 and x=+2 with the junction at x=0, so the sign
+    of the x-coordinate names the arm (the same rule step() uses to record which
+    sides were visited).
+    """
+    return "left" if endpoints[0][0] < 0 else "right"
+
+
+@dataclass
+class EpisodeOutcome:
+    """
+    How one episode of a rolled-out deployment ended.
+
+    ``symbol`` is the character the episode contributes to the deployment's
+    reward sequence; ``high_side`` is the arm holding the high reward DURING the
+    episode (the arms swap only afterwards, inside _transition_episode); and
+    ``chosen_side`` is the arm the agent actually walked into, None when it timed
+    out without reaching either. ``end_step`` is the 1-based index of the step
+    the episode ended on, which is also its frame number in a gif of the same
+    deployment, so a symbol can be traced back to the moment that produced it.
+    """
+    episode: int                # 1-based index within the deployment
+    reward: float               # the true reward reached: 1.0, 0.1 or 0.0
+    symbol: str                 # reward_symbol(reward)
+    high_side: str              # arm the high reward sat on this episode
+    chosen_side: str = None     # arm reached, or None on a timeout
+    end_step: int = 0
+
+    @property
+    def side_symbol(self):
+        """The l/r/. symbol for the arm this episode's agent walked into."""
+        return SIDE_SYMBOLS.get(self.chosen_side, NO_SIDE_SYMBOL)
+
+    @property
+    def high_side_symbol(self):
+        """The l/r symbol for the arm that held the high reward this episode."""
+        return SIDE_SYMBOLS.get(self.high_side, NO_SIDE_SYMBOL)
+
+
+def reward_sequence(episodes):
+    """The deployment's reward sequence, e.g. ``"HHHLHHHHHH"``."""
+    return "".join(outcome.symbol for outcome in episodes)
+
+
+def chosen_side_sequence(episodes):
+    """The arms the agent walked into, one symbol per episode, e.g. ``"llllrrrrrr"``."""
+    return "".join(outcome.side_symbol for outcome in episodes)
+
+
+def high_side_sequence(episodes):
+    """The arms the high reward sat on, one symbol per episode."""
+    return "".join(outcome.high_side_symbol for outcome in episodes)
+
+
+def roll_out_deployment(net, env, max_steps=1000, schedule=None,
+                        episodes_per_deployment=10, delayed_feedback=False,
+                        constant_feedback=False, deployment_index=0,
+                        capture_states=True):
+    """
+    Roll ``net`` out on a single deployment and return
+    ``(states, total_reward, episodes)``.
 
     Uses one activation per step, matching how the adaptive networks are
-    evaluated during evolution. Each step captures the maze, the agent's pose,
-    and the (switching) reward locations so the whole deployment -- including the
-    behaviour across the reward switch(es) -- is visible.
+    evaluated during evolution, and resets the network first, so the deployment
+    starts from unplastic weights exactly as it does inside a test's
+    evaluate_ function. ``total_reward`` is therefore that test's score for this
+    deployment, including the single-arm rule that zeroes a deployment the agent
+    never switched arms in (see MultiTMazeEnv.step).
 
-    The deployment shown is the first entry of ``schedule`` (defaulting to Test
-    1's all-single-switch sweep); pass a ``schedule`` and its matching
-    ``episodes_per_deployment`` / ``delayed_feedback`` to visualize a different
-    test's deployment. The env's previous configuration is restored before
-    returning so a shared instance stays safe to reuse.
+    ``states`` is one captured frame per step -- the maze, the agent's pose and
+    the (switching) reward locations -- for draw_tmaze_frame to render; pass
+    ``capture_states=False`` to skip building it when only the outcome is wanted.
+    ``episodes`` is one EpisodeOutcome per episode that finished, in order.
+
+    An episode's end is detected by env.current_episode changing, which
+    _transition_episode does on the same step it stores the episode's reward in
+    env.last_reward -- so reading last_reward straight after the step gives the
+    reward that episode ended on, in both feedback modes. The high arm has to be
+    read BEFORE the step instead: a switch episode swaps the arms inside that
+    same call.
+
+    ``schedule`` defaults to Test 1's all-single-switch sweep, and
+    ``deployment_index`` picks which of its entries to run (0 = the first), so
+    looping over a test's schedule covers every deployment it scores. The
+    remaining arguments configure the env the way that test's evaluate_ function
+    does -- ``episodes_per_deployment`` plus the ``delayed_feedback`` (Test 3)
+    and ``constant_feedback`` (Test 4) flags. See TEST_GIF_SPECS, which pairs
+    each test with its settings.
+
+    The env's previous configuration is restored before returning so a shared
+    instance stays safe to reuse.
     """
-    os.makedirs(os.path.dirname(gif_path), exist_ok=True)
-
     if schedule is None:
         schedule = all_single_switch_schedules()
 
     prev_schedule = env.active_schedule
     prev_episodes = env.episodes_per_deployment
     prev_delayed = env.delayed_feedback
+    prev_constant = env.constant_feedback
 
     env.active_schedule = list(schedule)
     env.episodes_per_deployment = episodes_per_deployment
     env.delayed_feedback = delayed_feedback
-    env._deployment_index = 0
+    env.constant_feedback = constant_feedback
+    # reset() reads active_schedule[_deployment_index] and then advances it, so
+    # seeding the index here is what selects the deployment to run.
+    env._deployment_index = deployment_index
     try:
         ob, _ = env.reset()
         net.reset()
 
         states = []
-        for _ in range(max_steps):
-            ob, _reward, terminated, truncated, _ = env.step(net.activate(ob))
-            states.append({
-                "maze": list(env.maze_points),
-                "current_position": list(env.current_position),
-                "rotation": env.rotation,
-                "high_reward": list(env.high_reward),
-                "low_rewards": list(env.low_rewards),
-                "episode": env.current_episode,
-            })
+        episodes = []
+        total_reward = 0.0
+        for step_number in range(1, max_steps + 1):
+            # Both read before stepping: the step that ends a switch episode
+            # also swaps the arms, and it advances the episode counter.
+            high_side = reward_side(env.high_reward)
+            episode_index = env.current_episode
+
+            ob, reward, terminated, truncated, _ = env.step(net.activate(ob))
+            total_reward += reward
+
+            if env.current_episode != episode_index:
+                symbol = reward_symbol(env.last_reward)
+                if symbol == HIGH_REWARD_SYMBOL:
+                    chosen_side = high_side
+                elif symbol == LOW_REWARD_SYMBOL:
+                    chosen_side = "right" if high_side == "left" else "left"
+                else:
+                    chosen_side = None
+                episodes.append(EpisodeOutcome(
+                    episode=episode_index + 1, reward=env.last_reward, symbol=symbol,
+                    high_side=high_side, chosen_side=chosen_side,
+                    end_step=step_number))
+
+            if capture_states:
+                states.append({
+                    "maze": list(env.maze_points),
+                    "current_position": list(env.current_position),
+                    "rotation": env.rotation,
+                    "high_reward": list(env.high_reward),
+                    "low_rewards": list(env.low_rewards),
+                    "episode": env.current_episode,
+                })
             if terminated or truncated:
                 break
     finally:
@@ -872,7 +1015,34 @@ def save_run_gif(net, env, gif_path, title, fps=4, max_steps=600,
         env.active_schedule = prev_schedule
         env.episodes_per_deployment = prev_episodes
         env.delayed_feedback = prev_delayed
+        env.constant_feedback = prev_constant
         env._deployment_index = 0
+
+    return states, total_reward, episodes
+
+
+def save_run_gif(net, env, gif_path, title, fps=4, max_steps=1000,
+                 schedule=None, episodes_per_deployment=10, delayed_feedback=False,
+                 constant_feedback=False, deployment_index=0):
+    """
+    Roll out ``net`` on a single deployment and save a gif of the run.
+
+    Every step is a frame, so the whole deployment -- including the behaviour
+    across the reward switch(es) -- is visible. The rollout itself is
+    roll_out_deployment's (see it for the arguments, all of which are passed
+    straight through); this only renders it.
+
+    Returns ``(total_reward, episodes)``: the deployment's fitness and the
+    per-episode EpisodeOutcome list, so a caller filming a whole test can write
+    down what each gif shows without re-running it.
+    """
+    os.makedirs(os.path.dirname(gif_path), exist_ok=True)
+
+    states, total_reward, episodes = roll_out_deployment(
+        net, env, max_steps=max_steps, schedule=schedule,
+        episodes_per_deployment=episodes_per_deployment,
+        delayed_feedback=delayed_feedback, constant_feedback=constant_feedback,
+        deployment_index=deployment_index)
 
     fig, ax = plt.subplots(figsize=(8, 8))
     try:
@@ -884,7 +1054,9 @@ def save_run_gif(net, env, gif_path, title, fps=4, max_steps=600,
 
         animation = FuncAnimation(fig, update, frames=len(states), interval=1000 / fps, blit=False)
         animation.save(gif_path, writer="pillow", fps=fps)
-        print(f"Saved animation to {gif_path}")
+        print(f"Saved animation to {gif_path} "
+              f"({len(states)} frames, deployment fitness {total_reward:.1f}, "
+              f"rewards {reward_sequence(episodes)})")
     except Exception as exc:  # visualization is best-effort; fall back to a still
         fallback_path = gif_path.replace(".gif", ".png")
         if states:
@@ -893,3 +1065,167 @@ def save_run_gif(net, env, gif_path, title, fps=4, max_steps=600,
         print(f"Could not save animation ({exc}); saved a still image to {fallback_path}")
     finally:
         plt.close(fig)
+
+    return total_reward, episodes
+
+
+# ---------------------------------------------------------------------------
+# Filming a whole post-evolution test.
+#
+# Each entry pairs a test with the env configuration its evaluate_ function
+# applies, so a gif made from it shows exactly the behaviour that test scored --
+# same schedules, same episode count, same feedback mode, same step budget. The
+# tests themselves are described at the top of this module.
+# ---------------------------------------------------------------------------
+TEST_GIF_SPECS = {
+    "test1": {
+        "short": "Test 1",
+        "label": "Test 1 (all single-switch schedules)",
+        "schedules": all_single_switch_schedules,
+        "episodes_per_deployment": 10,
+        "delayed_feedback": False,
+        "constant_feedback": False,
+        "max_steps": 1000,
+    },
+    "test2": {
+        "short": "Test 2",
+        "label": "Test 2 (double-switch generalization)",
+        "schedules": double_switch_schedules,
+        "episodes_per_deployment": TEST2_EPISODES_PER_DEPLOYMENT,
+        "delayed_feedback": False,
+        "constant_feedback": False,
+        "max_steps": 2000,
+    },
+    "test3": {
+        "short": "Test 3",
+        "label": "Test 3 (delayed reward feedback)",
+        "schedules": all_single_switch_schedules,
+        "episodes_per_deployment": 10,
+        "delayed_feedback": True,
+        "constant_feedback": False,
+        "max_steps": 1000,
+    },
+    "test4": {
+        "short": "Test 4",
+        "label": "Test 4 (constant reward feedback)",
+        "schedules": all_single_switch_schedules,
+        "episodes_per_deployment": 10,
+        "delayed_feedback": False,
+        "constant_feedback": True,
+        "max_steps": 1000,
+    },
+}
+
+
+def describe_deployment(entry):
+    """
+    ``(human description, filename slug)`` for one schedule entry.
+
+    An entry is ``(start side, switch_reward_episode)`` for the single-switch
+    tests and ``(start side, (episode, episode))`` for Test 2's double switches,
+    so both are rendered from the same code.
+    """
+    side, switch_field = entry
+    switches = (switch_field,) if isinstance(switch_field, int) else tuple(switch_field)
+    listed = "/".join(str(s) for s in switches)
+    switch_word = "switch" if len(switches) == 1 else "switches"
+    return (f"start {side}, {switch_word} after episode {listed}",
+            f"{side}_switch{'-'.join(str(s) for s in switches)}")
+
+
+@dataclass
+class DeploymentRecord:
+    """
+    One filmed deployment: which test and schedule entry it came from, the gif
+    it was written to, the fitness it scored, and how each of its episodes ended.
+
+    ``gif_path`` is None for a deployment that was rolled out without filming
+    (see save_test_gifs' ``film`` argument), so the reward sequences can be
+    collected on their own.
+    """
+    test: str                           # TEST_GIF_SPECS key
+    index: int                          # 1-based position in that test's schedule
+    entry: tuple                        # the schedule entry: (start side, switch field)
+    description: str                    # describe_deployment's human text
+    fitness: float                      # the deployment's score, as the test counts it
+    episodes: List[EpisodeOutcome] = field(default_factory=list)
+    gif_path: str = None
+
+    @property
+    def rewards(self):
+        """The deployment's reward sequence, e.g. ``"HHHLHHHHHH"``."""
+        return reward_sequence(self.episodes)
+
+    @property
+    def chosen_arms(self):
+        """The arms the agent walked into, one symbol per episode."""
+        return chosen_side_sequence(self.episodes)
+
+    @property
+    def high_arms(self):
+        """The arms the high reward sat on, one symbol per episode."""
+        return high_side_sequence(self.episodes)
+
+
+def save_test_gifs(net, env, out_dir, tests=("test1", "test2", "test4"),
+                   title=None, prefix="", fps=4, film=True):
+    """
+    Run every deployment of each named post-evolution test and return one
+    DeploymentRecord per deployment -- its fitness, its reward sequence, and the
+    gif it was filmed into.
+
+    One gif per deployment: Test 1 and Test 4 have 10 schedules each, Test 2 has
+    6, so the default selection produces 26. ``net`` is reset before each one
+    (inside roll_out_deployment), exactly as the tests themselves reset it
+    between deployments, so no deployment inherits another's plastic weights.
+
+    The env is driven exactly as each test's evaluate_ function drives it, so the
+    fitnesses returned here match that test's per-deployment scores and their mean
+    is the figure the study reports.
+
+    ``tests`` names entries of TEST_GIF_SPECS; ``title`` heads every frame (the
+    test and deployment are appended to it), and ``prefix`` is prepended to each
+    filename. ``film=False`` skips the rendering -- by far the slow part -- and
+    returns the same records with ``gif_path`` left None, which is how the reward
+    sequences can be collected on their own.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    written = []
+
+    for test_name in tests:
+        try:
+            spec = TEST_GIF_SPECS[test_name]
+        except KeyError:
+            raise ValueError(
+                f"Unknown test {test_name!r}: expected one of "
+                f"{', '.join(sorted(TEST_GIF_SPECS))}.") from None
+
+        schedule = spec["schedules"]()
+        for index, entry in enumerate(schedule):
+            described, slug = describe_deployment(entry)
+            # Two lines, and the short test name: the full label plus the
+            # deployment description on one line overruns the figure and gets
+            # clipped at both ends.
+            frame_title = (f"{title}\n" if title else "") + \
+                          f"{spec['short']} deployment {index + 1}/{len(schedule)}: {described}"
+            gif_path = os.path.join(
+                out_dir, f"{prefix}{test_name}_deploy{index + 1:02d}_{slug}.gif")
+
+            rollout = dict(max_steps=spec["max_steps"], schedule=schedule,
+                           episodes_per_deployment=spec["episodes_per_deployment"],
+                           delayed_feedback=spec["delayed_feedback"],
+                           constant_feedback=spec["constant_feedback"],
+                           deployment_index=index)
+            if film:
+                fitness, episodes = save_run_gif(net, env, gif_path, frame_title,
+                                                 fps=fps, **rollout)
+            else:
+                _states, fitness, episodes = roll_out_deployment(
+                    net, env, capture_states=False, **rollout)
+
+            written.append(DeploymentRecord(
+                test=test_name, index=index + 1, entry=entry, description=described,
+                fitness=fitness, episodes=episodes,
+                gif_path=gif_path if film else None))
+
+    return written

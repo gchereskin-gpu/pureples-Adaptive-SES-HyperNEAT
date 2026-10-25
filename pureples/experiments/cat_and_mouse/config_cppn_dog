@@ -2,8 +2,8 @@
 
 [NEAT]
 fitness_criterion     = max
-fitness_threshold     = 1000
-pop_size              = 70
+fitness_threshold     = 4500
+pop_size              = 100
 reset_on_extinction   = False
 no_fitness_termination = False
 
@@ -190,7 +190,7 @@ weight_init_type        = gaussian
 
 
 [DesReproduction]
-elitism            = 5
+elitism            = 1
 survival_threshold = 0.2
 min_species_size   = 1
 
@@ -289,6 +289,7 @@ conn_delete_prob        = 0.5
 
 # branch options
 branch_add_prob         = 0.05
+branch_delete_prob      = 0.05
 is_branch_default       = False
 is_branch_mutate_rate   = 0.0
 is_branch_rate_to_true_add = 0.0

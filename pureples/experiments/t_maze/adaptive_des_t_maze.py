@@ -32,7 +32,7 @@ from pureples.shared.gym_runner import run_adaptive_des
 from pureples.des_hyperneat import AdaptiveDESNetwork
 
 # S, M or L; Small, Medium or Large (logic implemented as "Not 'S' or 'M' then Large").
-VERSION = "M"
+VERSION = "L"
 VERSION_TEXT = "small" if VERSION == "S" else "medium" if VERSION == "M" else "large"
 
 MAZE_LENGTH = 1
@@ -45,12 +45,12 @@ NUM_DEPLOYMENTS = 4
 # on disk -- not just this batch. Run a study in batches by advancing the window,
 # e.g. 1..6, then 7..12, ... 25..30; if a batch crashes, only that batch is lost
 # and re-running it picks up where the earlier batches left off.
-START_RUN = 1
-END_RUN = 3
+START_RUN = 3
+END_RUN = 6
 
 # Maximum number of generations per evolutionary run (also the length the
 # per-run fitness series are padded to for the multi-run study).
-MAX_GENERATIONS = 1250
+MAX_GENERATIONS = 1000
 
 # Network coordinates and the resulting substrate.
 INPUT_COORDINATES = []
@@ -88,7 +88,7 @@ def run(gens, env, version):
     Run the pole balancing task using the Gym environment
     Returns the winning genome and the statistics of the run.
     """
-    winner, stats = run_adaptive_des(gens, env, 500, CONFIG, params(version), SUBSTRATE, NUM_DEPLOYMENTS,
+    winner, stats = run_adaptive_des(gens, env, 1000, CONFIG, params(version), SUBSTRATE, NUM_DEPLOYMENTS,
                                      num_workers=12, schedule_sampler=sample_generation_schedule)
     print(f"adaptive_des_hyperneat_t_maze_{MAZE_LENGTH_TEXT}_{VERSION_TEXT} done")
     return winner, stats

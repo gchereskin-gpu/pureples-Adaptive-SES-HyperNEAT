@@ -543,7 +543,7 @@ class AdaptiveDESNetwork:
                 if con is not None:
                     # Nodes will only connect upwards.
                     # If connections to same layer is wanted, change to con.y1 <= con.y2.
-                    if not c.w == 0.0 and con.y1 < con.y2 and not (con.x1 == con.x2 and con.y1 == con.y2):
+                    if not c.w == 0.0 and not (con.x1 == con.x2 and con.y1 == con.y2): # and con.y1 < con.y2 (add this to make it feedforward only)
                         self.connections.add(con)
     
     def des_hyperneat(self, branch_nodes, branch_id):
