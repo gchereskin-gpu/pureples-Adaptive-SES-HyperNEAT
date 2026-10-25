@@ -1,6 +1,7 @@
 
 
 This repo is home to a novel extension of Adaptive ES-HyperNEAT called Adaptive Specialized-ES-HyperNEAT. The following abstract overviews Adaptive SES-HyperNEAT's novelty:
+=================================================================================================================================================================================
 
 
   Neuroevolution mimics Darwinian evolution to evolve AI neural networks from scratch for control problems such as robotic control. Many features of biological brains have yet to be implemented in neuroevolution algorithms and may improve their ability to evolve intelligence.
@@ -11,9 +12,65 @@ This repo is home to a novel extension of Adaptive ES-HyperNEAT called Adaptive 
 
 
 
----------
-Below is the description of Pureples:
+Included in this repo is my custom cat-and-mouse domain for a personal project and helpful for further testing of Adaptive SES-HyperNEAT.
+=
+Cat-and-mouse was not used in the aforementioned study, but to evolve adaptive NNs for controlling my "RoboSphere" - an autonomous spherical rolling robot designed to actively evade and play with my dog.
 
+The following is a section of entries from my RoboSphere design journal, tracking some of my thought process of coding the cat-and-mouse domain.
+-
+
+Jul 23 (2026)
+
+Plan:
+Make design requirements
+No solutions, just requirements
+
+The hamster wheel will be best, but I need a separate isolated pendulum for the sensors
+Making the dynamics of kinematics in an environment is important
+
+
+Jul 29
+
+Plan:
+Figure out specifics of hamster design
+Finish design requirements (first take)
+I want to use a three-wheel design & a circular arrangement of sensors
+
+
+Aug 12
+
+Plan:
+complete preliminary parts list & measurements
+Half did parts, half did 3D model -> they inform each-other
+
+
+Aug 14
+	Made lots of progress with the code (implemented velocities/momentum, rings of input nodes, etc.). Big problem is that the rotational velocity is just making the agents spin forever.
+
+
+Aug 15
+	Had a great idea - I was going to have the output nodes control pairs of 2 motors so that outputs of each node make it go straight, but the three outputs would still have to be balanced, so instead, I made a ring of output nodes in the substrate which control the direction of movement. This complements the nonholonomic movement & mapping of inputs much better. Now evolution is evolving some solutions
+
+
+Aug 17
+-
+Thought of RoboSphere from a different perspective and considered some important questions. As a ‘product’, it needs to be easy to use. I should be able to remotely turn it on/off (perhaps on the dog harness). It could even have different modes, such as selecting different neural networks evolved with different fitness functions, a mode that stops and starts playing periodically to engage with Thor and let him rest.
+
+Aug 18
+
+Faced some new challenges with moving onto the building process. I did some math (paper and Mathematica) to figure out dimensions of the body angles for the motors and the offset from the equator of the sphere at which the motors should sit. It worked out beautifully which was cool. But then I had a hard time finding the right omniwheels and motors. I researched what motors I need - options and such. And many of the motors that would work are not the right size. One was close but is just a little too big. Not sure what to do… It’s challenging, too, that so many parts work together, because the size of the wheels affect the motors and the adapters, and the motors affect the battery, and the battery affects the weight, and the motors affect the encoder, etc.
+
+Sep 26
+
+Email BD and got a very insightful reply about the design process, and I want to apply it here. COTS components are the way to go right now, and if I can’t find motors that fit properly, I am going to take a new approach and make the sphere bigger. There aren’t particularly any downsides to this, and it gives me an opportunity to buy stronger and better spheres for the sensors to see through.
+
+
+Oct: Rest of the CAD design process not recorded in Github (it’s unrelated to the code)
+-
+
+
+Below is the description of Pureples:
+-
 PUREPLES - Pure Python Library for ES-HyperNEAT
 ===============================================
 
