@@ -1,8 +1,9 @@
 
 
-This repo is home to a novel extension of Adaptive ES-HyperNEAT called Adaptive Specialized-ES-HyperNEAT. The following abstract overviews Adaptive SES-HyperNEAT's novelty:
-=================================================================================================================================================================================
-
+This repo is home to a novel extension of Adaptive ES-HyperNEAT called Adaptive Specialized-ES-HyperNEAT.
+=
+The following abstract overviews Adaptive SES-HyperNEAT's novelty:
+-
 
   Neuroevolution mimics Darwinian evolution to evolve AI neural networks from scratch for control problems such as robotic control. Many features of biological brains have yet to be implemented in neuroevolution algorithms and may improve their ability to evolve intelligence.
   
@@ -12,8 +13,8 @@ This repo is home to a novel extension of Adaptive ES-HyperNEAT called Adaptive 
 
 
 
-Included in this repo is my custom cat-and-mouse domain for a personal project and helpful for further testing of Adaptive SES-HyperNEAT.
-=
+Included in this repo is my custom cat-and-mouse task for a personal project "RoboSphere".
+-
 Cat-and-mouse was not used in the aforementioned study, but to evolve adaptive NNs for controlling my "RoboSphere" - an autonomous spherical rolling robot designed to actively evade and play with my dog.
 
 The following is a section of entries from my RoboSphere design journal, tracking some of my thought process of coding the cat-and-mouse domain.
